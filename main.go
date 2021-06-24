@@ -17,15 +17,27 @@ import (
 )
 
 var (
-	template  gocv.Mat
+	templates []gocv.Mat
 	inputFile string
 	dryRun    bool
 	verbosive bool
 	debug     bool
 )
 
+type tplFileArg []string
+
+func (t tplFileArg) String() string {
+	return strings.Join(t, ", ")
+}
+
+func (t *tplFileArg) Set(s string) error {
+	*t = append(*t, s)
+	return nil
+}
+
 func main() {
-	tplFile := flag.String("template", "template.jpg", "template file")
+	var tplFiles tplFileArg
+	flag.Var(&tplFiles, "t", "template file")
 	flag.StringVar(&inputFile, "in", "", "input file")
 	outputFile := flag.String("out", "", "output file")
 	flag.BoolVar(&dryRun, "dryrun", false, "print command to stdout but don't execute them")
@@ -47,11 +59,19 @@ func main() {
 		log.Fatal("please provide output file")
 	}
 
-	template = gocv.IMRead(*tplFile, gocv.IMReadGrayScale)
-	if template.Empty() {
-		log.Fatal("invalid template file")
+	if len(tplFiles) == 0 {
+		log.Fatal("please provide template files")
 	}
-	defer template.Close()
+
+	for _, tplFile := range tplFiles {
+		template := gocv.IMRead(tplFile, gocv.IMReadGrayScale)
+		if template.Empty() {
+			log.Fatal("invalid template file", tplFile)
+		}
+		defer template.Close()
+		templates = append(templates, template)
+	}
+	log.Println("using", len(templates), "templates")
 
 	ffmpeg := strings.Fields(*ffmpegArgs)
 
@@ -166,7 +186,7 @@ func main() {
 	runCommand(change)
 	for _, p := range points {
 		filter := fmt.Sprintf("[0:v]crop=%d:%d:%d:%d,boxblur=%s[fg]; [0:v][fg]overlay=%d:%d[v]",
-			template.Cols(), template.Rows(), p.point.X, p.point.Y, *boxBlur, p.point.X, p.point.Y)
+			p.point.Width, p.point.Height, p.point.X, p.point.Y, *boxBlur, p.point.X, p.point.Y)
 		cmd := append(ffmpeg,
 			"-i", fmt.Sprintf("change-%02d.ts", p.index),
 			"-filter_complex", filter,
@@ -220,12 +240,18 @@ type (
 
 	indexpoint struct {
 		index int
-		point *image.Point
+		point *imagePoint
 	}
 
 	timepoint struct {
 		second float64
-		point  *image.Point
+		point  *imagePoint
+	}
+
+	imagePoint struct {
+		Width  int
+		Height int
+		*image.Point
 	}
 )
 
@@ -365,7 +391,7 @@ func findTemplate(seconds []float64, getOne bool) (na, nb *timepoint, parts [][]
 
 // Find template image at specified second of the video. Image position is
 // returned if image exists, otherwise nil.
-func check(second float64) *image.Point {
+func check(second float64) *imagePoint {
 	ffmpeg := exec.Command("ffmpeg",
 		"-ss", fmt.Sprintf("%.2f", second), "-i", inputFile,
 		"-frames:v", "1", "-f", "image2", "pipe:1")
@@ -379,7 +405,7 @@ func check(second float64) *image.Point {
 	return getLocation(second, jpeg)
 }
 
-func getLocation(second float64, file []byte) (loc *image.Point) {
+func getLocation(second float64, file []byte) (loc *imagePoint) {
 	src, err := gocv.IMDecode(file, gocv.IMReadGrayScale)
 	if err != nil || src.Empty() {
 		return nil
@@ -389,16 +415,22 @@ func getLocation(second float64, file []byte) (loc *image.Point) {
 	defer result.Close()
 	m := gocv.NewMat()
 	defer m.Close()
-	gocv.MatchTemplate(src, template, &result, gocv.TmCcoeffNormed, m)
-	_, maxVal, _, maxLoc := gocv.MinMaxLoc(result)
-	if maxVal < 0.9 {
-		return nil
+	for _, template := range templates {
+		gocv.MatchTemplate(src, template, &result, gocv.TmCcoeffNormed, m)
+		_, maxVal, _, maxLoc := gocv.MinMaxLoc(result)
+		if maxVal > 0.9 {
+			if verbosive {
+				log.Println("found template at:", second, "("+secToTime(int64(second))+")",
+					"position:", maxLoc, "score:", maxVal)
+			}
+			return &imagePoint{
+				Width:  template.Cols(),
+				Height: template.Rows(),
+				Point:  &maxLoc,
+			}
+		}
 	}
-	if verbosive {
-		log.Println("found template at:", second, "("+secToTime(int64(second))+")",
-			"position:", maxLoc, "score:", maxVal)
-	}
-	return &maxLoc
+	return nil
 }
 
 func runCommand(cmd []string) {
