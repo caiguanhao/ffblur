@@ -35,6 +35,14 @@ func (t *tplFileArg) Set(s string) error {
 	return nil
 }
 
+func addOptions(in []string) []string {
+	mmqs := os.Getenv("MAX_MUXING_QUEUE_SIZE")
+	if mmqs == "" {
+		return in
+	}
+	return append(in, "-max_muxing_queue_size", mmqs)
+}
+
 func main() {
 	var tplFiles tplFileArg
 	flag.Var(&tplFiles, "t", "template file")
@@ -135,8 +143,8 @@ func main() {
 		log.Println("all done")
 		return
 	}
-	keep := append(ffmpeg, "-i", inputFile)
-	change := append(ffmpeg, "-i", inputFile)
+	keep := addOptions(append(ffmpeg, "-i", inputFile))
+	change := addOptions(append(ffmpeg, "-i", inputFile))
 	var s float64
 	var idx int
 	points := []indexpoint{}
@@ -187,8 +195,7 @@ func main() {
 	for _, p := range points {
 		filter := fmt.Sprintf("[0:v]crop=%d:%d:%d:%d,boxblur=%s[fg]; [0:v][fg]overlay=%d:%d[v]",
 			p.point.Width, p.point.Height, p.point.X, p.point.Y, *boxBlur, p.point.X, p.point.Y)
-		cmd := append(ffmpeg,
-			"-i", fmt.Sprintf("change-%02d.ts", p.index),
+		cmd := append(addOptions(append(ffmpeg, "-i", fmt.Sprintf("change-%02d.ts", p.index))),
 			"-filter_complex", filter,
 			"-map", "[v]", "-map", "0:a",
 			"-c:v", videoCodec, "-c:a", "copy",
@@ -198,7 +205,8 @@ func main() {
 		runCommand(cmd)
 	}
 	log.Println("merging videos to", *outputFile)
-	concat := append(ffmpeg, "-i", "concat:"+strings.Join(filesToMerge, "|"), "-c", "copy", *outputFile)
+	concat := append(addOptions(append(ffmpeg, "-i", "concat:"+strings.Join(filesToMerge, "|"))),
+		"-c", "copy", *outputFile)
 	runCommand(concat)
 	if *noClean == false {
 		intermediateFiles = append(intermediateFiles, filesToMerge...)
@@ -395,10 +403,14 @@ func check(second float64) *imagePoint {
 	ffmpeg := exec.Command("ffmpeg",
 		"-ss", fmt.Sprintf("%.2f", second), "-i", inputFile,
 		"-frames:v", "1", "-f", "image2", "pipe:1")
-	if verbosive {
-		log.Println("running", ffmpeg)
-	}
 	jpeg, err := ffmpeg.Output()
+	if verbosive {
+		if err != nil {
+			log.Println(ffmpeg, "failed", err)
+		} else {
+			log.Println("command", ffmpeg, "success")
+		}
+	}
 	if err != nil {
 		return nil
 	}
